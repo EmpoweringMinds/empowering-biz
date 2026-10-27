@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavLink, useSearchParams } from "react-router-dom";
+import { NavLink, useNavigate, useSearchParams } from "react-router-dom";
 import {
     ArrowLeft,
     ArrowRight,
@@ -9,7 +9,7 @@ import {
 
 import { Button } from "../../shared/components/Button/Button";
 import Container from "../../shared/components/Container/Container";
-import { supabase } from "../../shared/lib/supabase";
+import { apiRequest } from "../../shared/lib/api";
 
 import styles from "./paymentfailure.module.css";
 import SEO from "../../shared/components/SEO/seo";
@@ -17,6 +17,7 @@ import SEO from "../../shared/components/SEO/seo";
 export default function PaymentFailure() {
     const [searchParams] = useSearchParams();
     const orderId = searchParams.get("order_id");
+    const navigate = useNavigate();
 
     const [order, setOrder] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -36,24 +37,21 @@ export default function PaymentFailure() {
                 setLoading(true);
                 setError("");
 
-                const { data, error: functionError } =
-                    await supabase.functions.invoke(
-                        "get_payment_result",
-                        {
-                            body: {
-                                order_id: orderId,
-                            },
-                        }
-                    );
-
-                if (functionError) {
-                    throw functionError;
-                }
+                const data = await apiRequest(
+                    `/api/orders/${encodeURIComponent(orderId)}/result`
+                );
 
                 if (!data?.success || !data?.order) {
-                    throw new Error(
-                        "Invalid payment result."
+                    throw new Error("Invalid payment result.");
+                }
+
+                // A delayed webhook may have completed the payment successfully.
+                if (data.order.status === "success") {
+                    navigate(
+                        `/payment/success?order_id=${encodeURIComponent(orderId)}`,
+                        { replace: true }
                     );
+                    return;
                 }
 
                 if (!cancelled) {
@@ -82,7 +80,7 @@ export default function PaymentFailure() {
         return () => {
             cancelled = true;
         };
-    }, [orderId]);
+    }, [orderId, navigate]);
 
     const formatPrice = (
         amount,
@@ -158,25 +156,31 @@ export default function PaymentFailure() {
         );
     }
 
+    const isPaymentFailed =
+    order.payment_status === "failed" &&
+    order.status !== "success";
+
     const isPending =
-        order.status === "pending" ||
-        order.status === "processing";
+    !isPaymentFailed &&
+    (order.status === "pending" || order.status === "processing");
 
-    const isCancelled =
-        order.status === "cancelled";
+    const isCancelled = order.status === "cancelled";
 
-    const title = isPending
+    const title = isPaymentFailed
+        ? "Your payment wasn't completed"
+        : isPending
         ? "Your payment is still processing"
         : isCancelled
-          ? "Payment was cancelled"
-          : "Payment wasn't completed";
+            ? "Payment was cancelled"
+            : "Payment wasn't completed";
 
-    const description = isPending
-        ? "We haven't received a final payment confirmation yet. Please wait a moment and check again."
-        : isCancelled
-          ? "The payment process was cancelled before your order could be completed."
-          : "We couldn't complete your payment. You can return to checkout and try again.";
-
+    const description = isPaymentFailed
+    ? "Razorpay confirmed that this payment attempt failed. Your order remains available to retry."
+    : isPending
+      ? "We haven't received a final payment confirmation yet. Please wait a moment and check again."
+      : isCancelled
+        ? "The payment process was cancelled before your order could be completed."
+        : "We couldn't complete your payment. You can return to checkout and try again.";
     return (
         <main className={styles.page}>
             <Container>
@@ -270,7 +274,7 @@ export default function PaymentFailure() {
                             {order.items.map(
                                 (item) => (
                                     <div
-                                        key={`${item.name}-${item.quantity}`}
+                                        key={`${item.name || item.slug || "Service"}-${item.quantity}`}
                                         className={
                                             styles.item
                                         }
@@ -282,7 +286,7 @@ export default function PaymentFailure() {
                                         >
                                             <strong>
                                                 {
-                                                    item.name
+                                                    item.name || item.slug || "Service"
                                                 }
                                             </strong>
 
@@ -335,9 +339,11 @@ export default function PaymentFailure() {
                         }
                     >
                         <p>
-                            {isPending
-                                ? "If you have already completed the payment, please don't try to pay again just yet."
-                                : "If your payment was debited but the order shows as failed, please contact us with your order ID before attempting another payment."}
+                            {isPaymentFailed
+                            ? "If money was debited from your account despite the failed payment, please contact us with your order ID before retrying."
+                            : isPending
+                            ? "If you have already completed the payment, please don't try to pay again just yet."
+                            : "If your payment was debited but the order shows as failed, please contact us with your order ID before attempting another payment."}
                         </p>
                     </div>
 

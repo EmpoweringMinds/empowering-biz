@@ -5,14 +5,15 @@
   "compatibility_date": "2026-10-26",
   "workers_dev": true,
   "vars": {
-    "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173"
+    "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173,https://empoweringbiz.theempoweringminds.com"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "empowering-biz-db",
-      "database_id": "REPLACE_WITH_DEDICATED_D1_DATABASE_ID",
-      "migrations_dir": "migrations"
+      "database_id": "5f1bca76-6163-4d6e-a33a-89cea28e57bc",
+      "migrations_dir": "migrations",
+      "remote": true
     }
   ]
 }

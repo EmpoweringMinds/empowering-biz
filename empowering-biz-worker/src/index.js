@@ -141,6 +141,69 @@ async function handleRequest(request, env) {
     }
   }
 
+
+  // Read-only order summary used by the frontend payment result pages.
+  // Do not return customer email or phone to the browser.
+  const orderResultMatch = path.match(/^\/api\/orders\/(EB-[0-9a-f-]{36})\/result$/i);
+  if (request.method === "GET" && orderResultMatch) {
+    const orderId = orderResultMatch[1];
+    try {
+      const order = await env.DB.prepare(
+        `SELECT order_id, amount_paise, currency, customer_name, status
+         FROM orders WHERE order_id = ? LIMIT 1`
+      ).bind(orderId).first();
+
+      if (!order) {
+        return json(request, env, { error: "Order not found" }, 404);
+      }
+
+      const payment = await env.DB.prepare(
+        `SELECT status, error_code, error_description
+         FROM payment_transactions
+         WHERE order_id = ?
+         ORDER BY id DESC LIMIT 1`
+      ).bind(orderId).first();
+
+      const { results = [] } = await env.DB.prepare(
+        `SELECT s.slug, oi.quantity, oi.amount_paise
+         FROM order_items oi
+         JOIN services s ON s.service_id = oi.service_id
+         WHERE oi.order_id = ?
+         ORDER BY oi.id ASC`
+      ).bind(orderId).all();
+
+      return json(request, env, {
+        success: true,
+        order: {
+          order_id: order.order_id,
+          status: order.status,
+          payment_status: payment?.status ?? "unknown",
+          payment_error: payment?.status === "failed"
+            ? {
+                code: payment.error_code,
+                description: payment.error_description
+              }
+            : null,
+          customer_name: order.customer_name,
+          amount: order.amount_paise / 100,
+          currency: order.currency,
+          items: results.map((item) => ({
+            slug: item.slug,
+            name: item.slug
+              .split("-")
+              .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+              .join(" "),
+            quantity: item.quantity,
+            amount: item.amount_paise / 100
+          }))
+        }
+      });
+    } catch (error) {
+      console.error("Could not load order result", error);
+      return json(request, env, { error: "Unable to load order result" }, 500);
+    }
+  }
+
   if (request.method === "POST" && path === "/api/orders") {
     let body;
     try {
@@ -455,7 +518,237 @@ async function handleRequest(request, env) {
       }
     }, 201);
   }
+  
+  if (request.method === "POST" && path === "/api/payments/record-failure") {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json(request, env, { error: "Request body must be valid JSON" }, 400);
+    }
 
+    const internalOrderId =
+      typeof body?.order_id === "string" ? body.order_id.trim() : "";
+    const submittedRazorpayOrderId =
+      typeof body?.razorpay_order_id === "string"
+        ? body.razorpay_order_id.trim()
+        : "";
+    const paymentId =
+      typeof body?.razorpay_payment_id === "string"
+        ? body.razorpay_payment_id.trim()
+        : "";
+
+    if (
+      !/^EB-[0-9a-f-]{36}$/i.test(internalOrderId) ||
+      !/^order_[A-Za-z0-9]+$/.test(submittedRazorpayOrderId) ||
+      !/^pay_[A-Za-z0-9]+$/.test(paymentId)
+    ) {
+      return json(request, env, { error: "Invalid payment failure details" }, 400);
+    }
+
+    const keyId = env.RAZORPAY_KEY_ID;
+    const keySecret = env.RAZORPAY_KEY_SECRET;
+    const paymentMode = (env.PAYMENT_MODE || "test").toLowerCase();
+
+    if (
+      !keyId ||
+      !keySecret ||
+      !["test", "live"].includes(paymentMode) ||
+      (paymentMode === "test" && !keyId.startsWith("rzp_test_")) ||
+      (paymentMode === "live" && !keyId.startsWith("rzp_live_"))
+    ) {
+      return json(
+        request,
+        env,
+        { error: "Razorpay credentials are not configured correctly" },
+        503
+      );
+    }
+
+    let order;
+    let transaction;
+
+    try {
+      order = await env.DB.prepare(
+        `SELECT order_id, amount_paise, currency, status
+         FROM orders WHERE order_id = ? LIMIT 1`
+      ).bind(internalOrderId).first();
+
+      if (!order) {
+        return json(request, env, { error: "Order not found" }, 404);
+      }
+
+      transaction = await env.DB.prepare(
+        `SELECT transaction_id, razorpay_order_id, razorpay_payment_id, status
+         FROM payment_transactions
+         WHERE order_id = ?
+         ORDER BY id DESC LIMIT 1`
+      ).bind(internalOrderId).first();
+
+      if (!transaction || !transaction.razorpay_order_id) {
+        return json(
+          request,
+          env,
+          { error: "Razorpay order has not been initialized" },
+          409
+        );
+      }
+
+      if (transaction.razorpay_order_id !== submittedRazorpayOrderId) {
+        return json(
+          request,
+          env,
+          { error: "Razorpay order does not match this internal order" },
+          422
+        );
+      }
+
+      if (order.status === "success" || transaction.status === "success") {
+        return json(
+          request,
+          env,
+          { error: "This order has already been paid successfully" },
+          409
+        );
+      }
+
+      if (transaction.razorpay_payment_id) {
+        return json(
+          request,
+          env,
+          { error: "A payment result is already associated with this transaction" },
+          409
+        );
+      }
+    } catch (error) {
+      console.error("Could not load order for failure recording", error);
+      return json(request, env, { error: "Unable to check payment details" }, 500);
+    }
+
+    let gatewayPayment;
+
+    try {
+      const response = await fetch(
+        `https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`,
+        {
+          method: "GET",
+          headers: { Authorization: razorpayAuth(keyId, keySecret) }
+        }
+      );
+
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+
+      if (!response.ok || !data?.id) {
+        console.error("Razorpay failure lookup failed", {
+          httpStatus: response.status,
+          code: data?.error?.code
+        });
+
+        return json(
+          request,
+          env,
+          { error: "Could not confirm payment status with Razorpay" },
+          502
+        );
+      }
+
+      gatewayPayment = data;
+    } catch (error) {
+      console.error("Razorpay failure lookup request failed", error);
+      return json(
+        request,
+        env,
+        { error: "Could not contact Razorpay to confirm payment status" },
+        502
+      );
+    }
+
+    if (
+      gatewayPayment.id !== paymentId ||
+      gatewayPayment.order_id !== transaction.razorpay_order_id ||
+      gatewayPayment.amount !== order.amount_paise ||
+      gatewayPayment.currency !== order.currency
+    ) {
+      return json(
+        request,
+        env,
+        { error: "Razorpay payment details do not match the saved order" },
+        422
+      );
+    }
+
+    if (gatewayPayment.status !== "failed") {
+      return json(
+        request,
+        env,
+        {
+          error: "Razorpay has not confirmed a failed payment",
+          payment_status: gatewayPayment.status || "unknown"
+        },
+        409
+      );
+    }
+
+    try {
+      await env.DB.prepare(
+        `UPDATE payment_transactions
+         SET status = 'failed',
+             error_code = ?,
+             error_description = ?,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE transaction_id = ?
+           AND status != 'success'
+           AND razorpay_payment_id IS NULL`
+      ).bind(
+        String(gatewayPayment.error_code || "PAYMENT_FAILED").slice(0, 100),
+        String(gatewayPayment.error_description || "Razorpay reports that this payment failed").slice(0, 500),
+        transaction.transaction_id
+      ).run();
+
+      const latest = await env.DB.prepare(
+        `SELECT status, razorpay_payment_id
+         FROM payment_transactions
+         WHERE transaction_id = ? LIMIT 1`
+      ).bind(transaction.transaction_id).first();
+
+      if (latest?.status === "success") {
+        return json(request, env, {
+          recorded: false,
+          status: "success",
+          message: "The payment succeeded; the failed attempt was not recorded over it"
+        });
+      }
+
+      if (latest?.status !== "failed" || latest.razorpay_payment_id !== null) {
+        return json(
+          request,
+          env,
+          { error: "Payment status changed concurrently; check the order before retrying" },
+          409
+        );
+      }
+
+      return json(request, env, {
+        recorded: true,
+        status: "failed",
+        order_id: internalOrderId,
+        message: "Razorpay confirmed the failed payment attempt"
+      });
+    } catch (error) {
+      console.error("Could not record failed payment attempt", error);
+      return json(
+        request,
+        env,
+        { error: "Could not save the payment failure status" },
+        500
+      );
+    }
+  }
 
   if (request.method === "POST" && path === "/api/payments/verify") {
     let body;
@@ -708,17 +1001,22 @@ async function handleRequest(request, env) {
            WHERE order_id = ? AND status != 'success'`
         ).bind(match.order_id));
       } else {
-        // A delayed failed event must never downgrade a payment/order already marked successful.
+        // Record the failed payment attempt without closing the overall order.
+        // A later successful payment must still be able to update this transaction.
         statements.push(env.DB.prepare(
-          `UPDATE payment_transactions SET razorpay_payment_id = COALESCE(razorpay_payment_id, ?), status = 'failed',
-             error_code = 'PAYMENT_FAILED', error_description = 'Razorpay payment.failed webhook',
-             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-           WHERE transaction_id = ? AND status != 'success' AND (razorpay_payment_id IS NULL OR razorpay_payment_id = ?)`
-        ).bind(payment.id, match.transaction_id, payment.id));
-        statements.push(env.DB.prepare(
-          `UPDATE orders SET status = 'failed', updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-           WHERE order_id = ? AND status != 'success'`
-        ).bind(match.order_id));
+          `UPDATE payment_transactions
+          SET status = 'failed',
+              error_code = ?,
+              error_description = ?,
+              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+          WHERE transaction_id = ?
+            AND status != 'success'
+            AND razorpay_payment_id IS NULL`
+        ).bind(
+          String(payment.error_code || "PAYMENT_FAILED").slice(0, 100),
+          String(payment.error_description || "Razorpay reports that this payment failed").slice(0, 500),
+          match.transaction_id
+        ));
       }
       statements.push(env.DB.prepare(
         `UPDATE webhook_events SET status = 'processed', processed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), error_message = NULL

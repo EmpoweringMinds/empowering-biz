@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { NavLink } from "react-router-dom";
-import { ArrowLeft, ArrowRight, LockKeyhole, CheckCircle2, Clock3 } from "lucide-react";
+import { NavLink, useNavigate } from "react-router-dom";
+import { ArrowLeft, ArrowRight, LockKeyhole } from "lucide-react";
 
 import { useCart } from "../../shared/context/useCart";
 import { getService } from "../../shared/lib/service";
@@ -38,14 +38,15 @@ function loadRazorpayScript() {
 }
 
 export default function Checkout() {
-  const { items, clearCart } = useCart();
+  const { items } = useCart();
+  const navigate = useNavigate();
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [paying, setPaying] = useState(false);
   const [customer, setCustomer] = useState({ name: "", email: "", phone: "" });
   const [formError, setFormError] = useState("");
-  const [paymentResult, setPaymentResult] = useState(null);
+  const [, setPaymentResult] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -193,37 +194,62 @@ export default function Checkout() {
             });
 
             if (verification?.verified && verification.status === "success") {
-              clearCart();
-              setPaymentResult({ status: "success", orderId: internalOrderId });
+              navigate(`/payment/success?order_id=${encodeURIComponent(internalOrderId)}`);
               return;
             }
 
-            if (verification?.verified && verification.status === "processing") {
-              setPaymentResult({ status: "pending", orderId: internalOrderId });
-              return;
-            }
-
-            if (verification?.status === "failed") {
-              setFormError("Razorpay reports that this payment failed. You can try again.");
-              setPaying(false);
-              return;
-            }
-
-            setPaymentResult({ status: "checking", orderId: internalOrderId });
+            // Pending, failed, or unconfirmed outcomes are checked against D1
+            // on the result page; the browser response alone is not treated as final.
+            navigate(`/payment/failure?order_id=${encodeURIComponent(internalOrderId)}`);
           } catch (verificationError) {
             console.error("Payment verification did not complete:", verificationError);
-            // A payment may have succeeded even if the verification request failed.
-            // Prevent an immediate duplicate payment attempt and show the order reference.
-            setPaymentResult({ status: "checking", orderId: internalOrderId });
+            // The payment may have succeeded even if this request failed.
+            // The result page reads the server-side order status before displaying an outcome.
+            navigate(`/payment/failure?order_id=${encodeURIComponent(internalOrderId)}`);
           }
         },
       });
 
-      checkout.on("payment.failed", (failure) => {
-        console.warn("Razorpay reports a failed payment attempt:", failure?.error?.code);
-        setFormError("The payment was not completed. You can try again when you're ready.");
-        setPaying(false);
+
+      checkout.on("payment.failed", async (failure) => {
+        console.warn(
+          "Razorpay reports a failed payment attempt:",
+          failure?.error?.code
+        );
+
+        if (!internalOrderId) {
+          setFormError("The payment was not completed. You can try again when you're ready.");
+          setPaying(false);
+          return;
+        }
+
+        const metadata = failure?.error?.metadata;
+        const razorpayPaymentId = metadata?.payment_id;
+        const razorpayOrderId = metadata?.order_id;
+
+        if (razorpayPaymentId && razorpayOrderId) {
+          try {
+            await apiRequest("/api/payments/record-failure", {
+              method: "POST",
+              body: JSON.stringify({
+                order_id: internalOrderId,
+                razorpay_order_id: razorpayOrderId,
+                razorpay_payment_id: razorpayPaymentId,
+              }),
+            });
+          } catch (failureRecordError) {
+            // Do not assume the failure was saved. The result page will
+            // read the authoritative order state from the Worker.
+            console.error(
+              "Could not record the failed payment attempt:",
+              failureRecordError
+            );
+          }
+        }
+
+        navigate(`/payment/failure?order_id=${encodeURIComponent(internalOrderId)}`);
       });
+
 
       checkout.open();
     } catch (submitError) {
@@ -236,34 +262,6 @@ export default function Checkout() {
       }
     }
   };
-
-  if (paymentResult) {
-    const isSuccess = paymentResult.status === "success";
-    const isPending = paymentResult.status === "pending";
-    return (
-      <main className={styles.page}>
-        <SEO title="Payment status | Empowering Biz" description="Your Empowering Biz order payment status." path="/checkout" noIndex />
-        <Container>
-          <div className={styles.empty}>
-            {isSuccess ? <CheckCircle2 size={42} aria-hidden="true" /> : <Clock3 size={42} aria-hidden="true" />}
-            <h1>{isSuccess ? "Payment confirmed" : isPending ? "Payment confirmation pending" : "We're confirming your payment"}</h1>
-            <p>
-              {isSuccess
-                ? "Your payment has been verified and your order is confirmed."
-                : isPending
-                  ? "Your payment is authorised but has not yet been confirmed as captured. Please don't try to pay again."
-                  : "We couldn't confirm the final payment status yet. Please don't make another payment. Keep your order reference and contact us if the status doesn't update."}
-            </p>
-            <p><strong>Order reference:</strong> {paymentResult.orderId}</p>
-            <Button as={NavLink} to="/contact" variant="primary" size="large" endIcon={<ArrowRight size={18} />}>
-              Contact us about this order
-            </Button>
-            {isSuccess && <p>You can safely close this page.</p>}
-          </div>
-        </Container>
-      </main>
-    );
-  }
 
   if (items.length === 0) {
     return (

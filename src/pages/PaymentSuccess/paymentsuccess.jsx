@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavLink, useSearchParams } from "react-router-dom";
+import { NavLink, useNavigate, useSearchParams } from "react-router-dom";
 import {
     ArrowRight,
     CircleCheck,
@@ -8,7 +8,7 @@ import {
 
 import { Button } from "../../shared/components/Button/Button";
 import Container from "../../shared/components/Container/Container";
-import { supabase } from "../../shared/lib/supabase";
+import { apiRequest } from "../../shared/lib/api";
 import { useCart } from "../../shared/context/useCart";
 
 import styles from "./paymentsuccess.module.css";
@@ -17,6 +17,7 @@ import SEO from "../../shared/components/SEO/seo";
 export default function PaymentSuccess() {
     const [searchParams] = useSearchParams();
     const orderId = searchParams.get("order_id");
+    const navigate = useNavigate();
 
     const [order, setOrder] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -38,24 +39,21 @@ export default function PaymentSuccess() {
                 setLoading(true);
                 setError("");
 
-                const { data, error: functionError } =
-                    await supabase.functions.invoke(
-                        "get_payment_result",
-                        {
-                            body: {
-                                order_id: orderId,
-                            },
-                        }
-                    );
-
-                if (functionError) {
-                    throw functionError;
-                }
+                const data = await apiRequest(
+                    `/api/orders/${encodeURIComponent(orderId)}/result`
+                );
 
                 if (!data?.success || !data?.order) {
-                    throw new Error(
-                        "Invalid payment result."
+                    throw new Error("Invalid payment result.");
+                }
+
+                // Never render the success page unless D1 confirms the order is successful.
+                if (data.order.status !== "success") {
+                    navigate(
+                        `/payment/failure?order_id=${encodeURIComponent(orderId)}`,
+                        { replace: true }
                     );
+                    return;
                 }
 
                 if (!cancelled) {
@@ -85,7 +83,7 @@ export default function PaymentSuccess() {
         return () => {
             cancelled = true;
         };
-    }, [orderId, clearCart]);
+    }, [orderId, clearCart, navigate]);
 
     const formatPrice = (
         amount,
@@ -243,7 +241,7 @@ export default function PaymentSuccess() {
                             {order.items.map(
                                 (item) => (
                                     <div
-                                        key={`${item.name}-${item.quantity}`}
+                                        key={`${item.name || item.slug || "Service"}-${item.quantity}`}
                                         className={
                                             styles.item
                                         }
@@ -255,7 +253,7 @@ export default function PaymentSuccess() {
                                         >
                                             <strong>
                                                 {
-                                                    item.name
+                                                    item.name || item.slug || "Service"
                                                 }
                                             </strong>
 
@@ -312,9 +310,7 @@ export default function PaymentSuccess() {
                         />
 
                         <p>
-                            A confirmation email has
-                            been sent with your order
-                            details.
+                            Keep your order ID handy if you need to contact our team.
                         </p>
                     </div>
 
