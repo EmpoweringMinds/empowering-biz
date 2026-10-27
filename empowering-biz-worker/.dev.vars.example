@@ -1,0 +1,6 @@
+# Copy to .dev.vars only when secrets are needed. Never commit .dev.vars.
+# RAZORPAY_KEY_ID=
+# RAZORPAY_KEY_SECRET=
+# RAZORPAY_WEBHOOK_SECRET=
+# RESEND_API_KEY=
+# ADMIN_NOTIFICATION_EMAIL=

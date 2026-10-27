@@ -1,0 +1,124 @@
+const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
+
+function allowedOrigins(env) {
+  return (env.ALLOWED_ORIGINS || "http://localhost:5173,http://127.0.0.1:5173")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function corsHeaders(request, env) {
+  const origin = request.headers.get("Origin");
+  const headers = {
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Max-Age": "86400",
+    "Vary": "Origin"
+  };
+  if (origin && allowedOrigins(env).includes(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+  }
+  return headers;
+}
+
+function json(request, env, data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...JSON_HEADERS, ...corsHeaders(request, env) }
+  });
+}
+
+function toPublicService(row) {
+  return {
+    id: row.id,
+    service_id: row.service_id,
+    slug: row.slug,
+    price: row.price_paise == null ? null : row.price_paise / 100,
+    price_paise: row.price_paise,
+    price_type: row.price_type,
+    currency: row.currency,
+    is_active: Boolean(row.is_active),
+    purchase_type: row.purchase_type,
+    // Explicit UI hint only. The Worker will independently enforce this at checkout.
+    checkout_eligible:
+      row.is_active === 1 &&
+      row.price_type === "fixed" &&
+      row.price_paise != null &&
+      row.price_paise > 0 &&
+      ["cart", "month", "session"].includes(row.purchase_type)
+  };
+}
+
+async function handleRequest(request, env) {
+  const url = new URL(request.url);
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  const headers = corsHeaders(request, env);
+
+  if (request.method === "OPTIONS") {
+    const origin = request.headers.get("Origin");
+    if (origin && !allowedOrigins(env).includes(origin)) {
+      return new Response("Origin not allowed", { status: 403, headers });
+    }
+    return new Response(null, { status: 204, headers });
+  }
+
+  const origin = request.headers.get("Origin");
+  if (origin && !allowedOrigins(env).includes(origin)) {
+    return json(request, env, { error: "Origin not allowed" }, 403);
+  }
+
+  if (request.method === "GET" && path === "/api/health") {
+    try {
+      const result = await env.DB.prepare("SELECT 1 AS ok").first();
+      return json(request, env, { ok: result?.ok === 1, service: "empowering-biz-api", database: "connected" });
+    } catch (error) {
+      console.error("Health check database error", error);
+      return json(request, env, { ok: false, service: "empowering-biz-api", database: "unavailable" }, 503);
+    }
+  }
+
+  if (request.method === "GET" && path === "/api/services") {
+    try {
+      const { results = [] } = await env.DB.prepare(
+        `SELECT id, service_id, slug, price_paise, price_type, currency, is_active, purchase_type
+         FROM services WHERE is_active = 1 ORDER BY id ASC`
+      ).all();
+      return json(request, env, { services: results.map(toPublicService), count: results.length });
+    } catch (error) {
+      console.error("Service list query failed", error);
+      return json(request, env, { error: "Unable to load services" }, 500);
+    }
+  }
+
+  const serviceMatch = path.match(/^\/api\/services\/([^/]+)$/);
+  if (request.method === "GET" && serviceMatch) {
+    let slug;
+    try {
+      slug = decodeURIComponent(serviceMatch[1]);
+    } catch {
+      return json(request, env, { error: "Invalid service slug" }, 400);
+    }
+    try {
+      const row = await env.DB.prepare(
+        `SELECT id, service_id, slug, price_paise, price_type, currency, is_active, purchase_type
+         FROM services WHERE slug = ? AND is_active = 1 LIMIT 1`
+      ).bind(slug).first();
+      if (!row) return json(request, env, { error: "Service not found" }, 404);
+      return json(request, env, { service: toPublicService(row) });
+    } catch (error) {
+      console.error("Service detail query failed", error);
+      return json(request, env, { error: "Unable to load service" }, 500);
+    }
+  }
+
+  if (request.method !== "GET") {
+    return json(request, env, { error: "Method not allowed" }, 405);
+  }
+  return json(request, env, { error: "Not found" }, 404);
+}
+
+export default {
+  fetch(request, env) {
+    return handleRequest(request, env);
+  }
+};

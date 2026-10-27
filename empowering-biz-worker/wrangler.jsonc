@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "empowering-biz-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-26",
+  "workers_dev": true,
+  "vars": {
+    "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "empowering-biz-db",
+      "database_id": "REPLACE_WITH_DEDICATED_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

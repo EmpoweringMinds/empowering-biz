@@ -1,0 +1,24 @@
+{
+  "name": "empowering-biz-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "db:migrate:local": "wrangler d1 migrations apply empowering-biz-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply empowering-biz-db --remote",
+    "db:create": "wrangler d1 create empowering-biz-db",
+    "deploy": "wrangler deploy"
+  },
+  "overrides": {
+  "undici": "^6.29.1"
+},
+  "devDependencies": {
+    "wrangler": "^4.152.0"
+  },
+  "allowScripts": {
+    "sharp@0.33.5": true,
+    "esbuild@0.28.2": true,
+    "workerd@1.20261019.1": true
+  }
+}

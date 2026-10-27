@@ -2,7 +2,6 @@ import { NavLink } from "react-router-dom";
 import styles from "./Navbar.module.css";
 import { navLinks } from "../../data/navbar.js";
 import { Button } from "../Button/Button";
-import logo from "../../../assets/logo-without-name.webp";
 import { useState, useEffect } from "react";
 import { Menu, X, ShoppingCart } from "lucide-react";
 import { useCart } from "../../context/useCart.js";
